@@ -561,6 +561,91 @@ def fmt_odds(decimal_odds):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# RECOMMENDATION ENGINE
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+DOUBLE_OPP_LABELS = {
+    "1X": "Local o Empate",
+    "X2": "Empate o Visitante",
+    "12": "Local o Visitante",
+}
+
+
+def get_recommendation(probs, edges, kelly_vals, implied, odds_map):
+    """
+    5-rule decision engine. Returns:
+      (action, reason, bet_type, outcome_key, bet_odds, bet_prob, bet_edge, bet_kelly)
+      action: "BET" or "SKIP"
+      bet_type: "directa" | "doble_oportunidad" | None
+    """
+    ph, pd_, pa = probs["H"], probs["D"], probs["A"]
+    eh, ed, ea = edges.get("H", 0), edges.get("D", 0), edges.get("A", 0)
+    kh, kd, ka = kelly_vals.get("H", 0), kelly_vals.get("D", 0), kelly_vals.get("A", 0)
+
+    # REGLA 1: ningún outcome tiene edge > 5% → check doble oportunidad first
+    max_single_edge = max(eh, ed, ea)
+
+    # REGLA 2: Si el mejor outcome tiene prob > 55% Y edge > 5% → APUESTA DIRECTA
+    for key, prob, edge, k, odds in [
+        ("H", ph, eh, kh, odds_map.get("H", 0)),
+        ("D", pd_, ed, kd, odds_map.get("D", 0)),
+        ("A", pa, ea, ka, odds_map.get("A", 0)),
+    ]:
+        if prob > 0.55 and edge > 0.05:
+            # REGLA 5: Kelly < 2% → SKIP
+            if k < 0.02:
+                return ("SKIP", "Kelly insuficiente — varianza muy alta", None, None, 0, 0, 0, 0)
+            return ("BET", None, "directa", key, odds, prob, edge, k)
+
+    # REGLA 3: top 2 probs within 10% → SKIP
+    top_two = sorted([ph, pd_, pa], reverse=True)[:2]
+    if top_two[0] - top_two[1] < 0.10:
+        return ("SKIP", "Modelo sin conviccion — probabilidades muy parejas", None, None, 0, 0, 0, 0)
+
+    # REGLA 4: DOBLE OPORTUNIDAD
+    double_opps = {
+        "1X": {"prob": ph + pd_, "keys": ("H", "D"), "implied": implied.get("H", 0) + implied.get("D", 0)},
+        "X2": {"prob": pd_ + pa, "keys": ("D", "A"), "implied": implied.get("D", 0) + implied.get("A", 0)},
+        "12": {"prob": ph + pa, "keys": ("H", "A"), "implied": implied.get("H", 0) + implied.get("A", 0)},
+    }
+
+    best_do = None
+    best_do_edge = 0
+    for do_key, do_data in double_opps.items():
+        do_edge = do_data["prob"] - do_data["implied"]
+        if do_data["prob"] > 0.72 and do_edge > 0.05:
+            # Compute combined odds: 1 / (raw sum of implied probs with vig)
+            k1, k2 = do_data["keys"]
+            raw_combined = (1 / odds_map.get(k1, 999)) + (1 / odds_map.get(k2, 999))
+            do_odds = 1 / raw_combined if raw_combined > 0 else 1.0
+            do_kelly = kelly(do_data["prob"], do_odds)
+            if do_kelly >= 0.02 and do_edge > best_do_edge:
+                best_do = (do_key, do_odds, do_data["prob"], do_edge, do_kelly)
+                best_do_edge = do_edge
+
+    if best_do:
+        do_key, do_odds, do_prob, do_edge, do_kelly = best_do
+        return ("BET", None, "doble_oportunidad", do_key, do_odds, do_prob, do_edge, do_kelly)
+
+    # If we have a single edge > 5% but prob <= 55% and no double opp qualifies
+    if max_single_edge > 0.05:
+        # Find the best single outcome
+        for key, prob, edge, k, odds in sorted(
+            [("H", ph, eh, kh, odds_map.get("H", 0)),
+             ("D", pd_, ed, kd, odds_map.get("D", 0)),
+             ("A", pa, ea, ka, odds_map.get("A", 0))],
+            key=lambda x: x[2], reverse=True
+        ):
+            if edge > 0.05:
+                if k < 0.02:
+                    return ("SKIP", "Kelly insuficiente — varianza muy alta", None, None, 0, 0, 0, 0)
+                return ("BET", None, "directa", key, odds, prob, edge, k)
+
+    # REGLA 1: No edge
+    return ("SKIP", "Sin edge suficiente vs la casa", None, None, 0, 0, 0, 0)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # ANALYSIS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -584,24 +669,22 @@ def analyze_all(df, config, meta, bases, upcoming, odds_data):
         od = odds_match.get("draw")
         oa = odds_match.get("away")
 
-        best_edge = 0.0
-        best_outcome = None
-        best_kelly = 0.0
-        best_odds = 0.0
         edges = {}
+        kelly_vals = {}
+        implied = {}
+        odds_map = {}
 
         if oh and od and oa:
             tot = 1 / oh + 1 / od + 1 / oa
-            impl = {"H": (1 / oh) / tot, "D": (1 / od) / tot, "A": (1 / oa) / tot}
+            implied = {"H": (1 / oh) / tot, "D": (1 / od) / tot, "A": (1 / oa) / tot}
             odds_map = {"H": oh, "D": od, "A": oa}
             for o in LABEL_ORDER:
-                edges[o] = probs[o] - impl[o]
-                k = kelly(probs[o], odds_map[o])
-                if edges[o] > best_edge:
-                    best_edge = edges[o]
-                    best_outcome = o
-                    best_kelly = k
-                    best_odds = odds_map[o]
+                edges[o] = probs[o] - implied[o]
+                kelly_vals[o] = kelly(probs[o], odds_map[o])
+
+        # Run recommendation engine
+        rec = get_recommendation(probs, edges, kelly_vals, implied, odds_map)
+        action, skip_reason, bet_type, bet_key, bet_odds, bet_prob, bet_edge, bet_kelly = rec
 
         round_str = fx["league"].get("round", "")
         round_num = round_str.split(" - ")[-1] if " - " in round_str else round_str
@@ -618,10 +701,19 @@ def analyze_all(df, config, meta, bases, upcoming, odds_data):
             "oh": oh, "od": od, "oa": oa,
             "bookie": odds_match.get("bookmaker", ""),
             "edges": edges,
-            "best_edge": best_edge,
-            "best_outcome": best_outcome,
-            "best_kelly": best_kelly,
-            "best_odds": best_odds,
+            "kelly_vals": kelly_vals,
+            "implied": implied,
+            "odds_map": odds_map,
+            # Recommendation
+            "action": action,
+            "skip_reason": skip_reason,
+            "bet_type": bet_type,
+            "bet_key": bet_key,
+            "bet_odds": bet_odds,
+            "bet_prob": bet_prob,
+            "bet_edge": bet_edge,
+            "bet_kelly": bet_kelly,
+            # Context
             "home_form": get_team_form(df, home),
             "away_form": get_team_form(df, away),
             "home_elo": get_team_elo(df, home),
@@ -638,21 +730,49 @@ def analyze_all(df, config, meta, bases, upcoming, odds_data):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-def form_dots(results):
-    colors = {"H": GREEN, "D": YELLOW, "A": RED}
-    letters = {"H": "W", "D": "D", "A": "L"}
-    text_colors = {"H": "#000", "D": "#000", "A": "#fff"}
-    html = ""
-    for r in results:
-        html += f'<span class="form-dot" style="background:{colors[r]};color:{text_colors[r]};">{letters[r]}</span>'
-    return html
+def _outcome_display_name(m, key):
+    """Human-readable outcome name."""
+    if key == "H":
+        return m["home"]
+    elif key == "A":
+        return m["away"]
+    elif key == "D":
+        return "Empate"
+    # Double opportunity keys
+    elif key in DOUBLE_OPP_LABELS:
+        return DOUBLE_OPP_LABELS[key]
+    return key
 
 
-def render_card_html(m, bankroll):
-    has_edge = m["best_edge"] > 0.05
-    cls = "mc mc-edge" if has_edge else "mc mc-skip"
+def _outcome_side_label(key):
+    """Short side label."""
+    return {"H": "Local", "D": "Empate", "A": "Visitante"}.get(key, key)
 
-    html = f"""<div class="{cls}">
+
+def render_bet_card(m, bankroll):
+    """Render a BET card — green border, action-oriented."""
+    stake = bankroll * m["bet_kelly"]
+    win_net = stake * (m["bet_odds"] - 1)
+
+    # Bet description
+    if m["bet_type"] == "directa":
+        bet_label = f"{_outcome_display_name(m, m['bet_key'])} ({_outcome_side_label(m['bet_key'])})"
+        tipo = "Apuesta directa"
+        momio_str = f"{m['bet_odds']:.2f} / {decimal_to_american(m['bet_odds'])}"
+    else:
+        # Doble oportunidad
+        do_key = m["bet_key"]
+        do_map = {"1X": "1X", "X2": "X2", "12": "12"}
+        if do_key == "1X":
+            bet_label = f"{m['home']} o Empate (Doble Oportunidad)"
+        elif do_key == "X2":
+            bet_label = f"Empate o {m['away']} (Doble Oportunidad)"
+        else:
+            bet_label = f"{m['home']} o {m['away']} (Doble Oportunidad)"
+        tipo = f"Doble Oportunidad {do_map[do_key]}"
+        momio_str = f"{m['bet_odds']:.2f} / {decimal_to_american(m['bet_odds'])}"
+
+    html = f"""<div class="mc mc-edge">
     <div class="mc-head">
         <span class="mc-date">{m['date']} (CDMX)</span>
         <span class="mc-round">Jornada {m['round']}</span>
@@ -668,23 +788,102 @@ def render_card_html(m, bankroll):
             <span class="tm-name">{m['away']}</span>
         </div>
     </div>
-    <div class="pb">
+    <div style="background:linear-gradient(135deg,#064E3B,#065F46);border:1px solid {GREEN}30;border-radius:10px;padding:16px 20px;font-family:'JetBrains Mono',monospace;">
+        <div style="font-size:16px;font-weight:800;color:{GREEN};margin-bottom:8px;">APOSTAR: {bet_label}</div>
+        <div style="font-size:12px;color:{MUTED};margin-bottom:12px;">Tipo: {tipo}</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:13px;">
+            <div>
+                <span style="color:{MUTED};">Momio:</span>
+                <strong style="color:{WHITE};">{momio_str}</strong>
+            </div>
+            <div>
+                <span style="color:{MUTED};">Edge vs casa:</span>
+                <strong style="color:{GREEN};">+{m['bet_edge']*100:.1f}%</strong>
+            </div>
+        </div>
+        <div style="border-top:1px solid {GREEN}30;margin:12px 0;"></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;font-size:13px;">
+            <div>
+                <span style="color:{MUTED};">Apostar:</span><br>
+                <strong style="color:{WHITE};font-size:16px;">${stake:,.0f}</strong>
+                <span style="color:{MUTED};font-size:11px;"> pesos</span>
+            </div>
+            <div>
+                <span style="color:{MUTED};">Si ganas:</span><br>
+                <strong style="color:{GREEN};font-size:16px;">+${win_net:,.0f}</strong>
+                <span style="color:{MUTED};font-size:11px;"> pesos</span>
+            </div>
+            <div>
+                <span style="color:{MUTED};">Si pierdes:</span><br>
+                <strong style="color:{RED};font-size:16px;">-${stake:,.0f}</strong>
+                <span style="color:{MUTED};font-size:11px;"> pesos</span>
+            </div>
+        </div>
+    </div>
+    </div>"""
+    return html
+
+
+def render_skip_card(m):
+    """Render a SKIP card — grey, muted, with reason."""
+    reason = m["skip_reason"] or "Sin edge suficiente vs la casa"
+
+    html = f"""<div class="mc mc-skip">
+    <div class="mc-head">
+        <span class="mc-date">{m['date']} (CDMX)</span>
+        <span class="mc-round">Jornada {m['round']}</span>
+    </div>
+    <div class="teams">
+        <div class="tm tm-h">
+            <span class="tm-name">{m['home']}</span>
+            <img class="tm-logo" src="{m['home_logo']}" alt="">
+        </div>
+        <span class="vs">VS</span>
+        <div class="tm tm-a">
+            <img class="tm-logo" src="{m['away_logo']}" alt="">
+            <span class="tm-name">{m['away']}</span>
+        </div>
+    </div>
+    <div style="background:{SURFACE};border:1px solid {BORDER};border-radius:8px;padding:14px 18px;text-align:center;">
+        <div style="font-size:14px;font-weight:700;color:{MUTED};margin-bottom:6px;">SKIP</div>
+        <div style="font-size:13px;color:{MUTED};">{reason}</div>
+        <div style="font-size:12px;color:{SUBTLE};margin-top:6px;">
+            ({m['home'][:3].upper()} {m['probs']['H']*100:.0f}% · Emp {m['probs']['D']*100:.0f}% · {m['away'][:3].upper()} {m['probs']['A']*100:.0f}%)
+        </div>
+    </div>
+    </div>"""
+    return html
+
+
+def form_dots(results):
+    colors = {"H": GREEN, "D": YELLOW, "A": RED}
+    letters = {"H": "W", "D": "D", "A": "L"}
+    text_colors = {"H": "#000", "D": "#000", "A": "#fff"}
+    html = ""
+    for r in results:
+        html += f'<span class="form-dot" style="background:{colors[r]};color:{text_colors[r]};">{letters[r]}</span>'
+    return html
+
+
+def render_details(m):
+    """Full details inside expander: probs, odds grid, form, stats."""
+    # Probability bar
+    pb_html = f"""<div class="pb">
         <div style="width:{m['probs']['H']*100:.0f}%;background:{BLUE};">H {m['probs']['H']*100:.0f}%</div>
         <div style="width:{m['probs']['D']*100:.0f}%;background:{YELLOW};color:#000;">D {m['probs']['D']*100:.0f}%</div>
         <div style="width:{m['probs']['A']*100:.0f}%;background:{RED};">A {m['probs']['A']*100:.0f}%</div>
     </div>"""
+    st.markdown(pb_html, unsafe_allow_html=True)
 
+    # Odds grid
     if m["oh"] and m["od"] and m["oa"]:
-        tot = 1 / m["oh"] + 1 / m["od"] + 1 / m["oa"]
-        ih = (1 / m["oh"]) / tot * 100
-        id_ = (1 / m["od"]) / tot * 100
-        ia = (1 / m["oa"]) / tot * 100
+        imp = m["implied"]
         e = m["edges"]
 
         def ec(v):
             return "og-pos" if v > 0 else "og-neg"
 
-        html += f"""<div class="og">
+        og_html = f"""<div class="og">
         <div class="og-h"></div>
         <div class="og-h" style="text-align:center">Home</div>
         <div class="og-h" style="text-align:center">Draw</div>
@@ -698,62 +897,27 @@ def render_card_html(m, bankroll):
         <div class="og-c">{fmt_odds(m['od'])}</div>
         <div class="og-c">{fmt_odds(m['oa'])}</div>
         <div class="og-l">Casa</div>
-        <div class="og-c">{ih:.1f}%</div>
-        <div class="og-c">{id_:.1f}%</div>
-        <div class="og-c">{ia:.1f}%</div>
+        <div class="og-c">{imp.get('H',0)*100:.1f}%</div>
+        <div class="og-c">{imp.get('D',0)*100:.1f}%</div>
+        <div class="og-c">{imp.get('A',0)*100:.1f}%</div>
         <div class="og-l">Edge</div>
         <div class="og-c {ec(e.get('H',0))}">{e.get('H',0)*100:+.1f}%</div>
         <div class="og-c {ec(e.get('D',0))}">{e.get('D',0)*100:+.1f}%</div>
         <div class="og-c {ec(e.get('A',0))}">{e.get('A',0)*100:+.1f}%</div>
         </div>"""
+        st.markdown(og_html, unsafe_allow_html=True)
 
-    if has_edge:
-        oname = LABEL_NAMES[m["best_outcome"]]
-        kelly_pct = m["best_kelly"] * 100
-        model_prob = m["probs"][m["best_outcome"]] * 100
-        # Implied probability from bookmaker
-        impl_prob = (1 / m["best_odds"]) / (1 / m["oh"] + 1 / m["od"] + 1 / m["oa"]) * 100
-
-        html += f"""<div style="background:{SURFACE};border-radius:8px;padding:14px 18px;margin-bottom:10px;font-size:13px;line-height:1.8;">
-        <span style="color:{MUTED};">Nuestro modelo:</span> <strong style="color:{WHITE};">{oname} {model_prob:.1f}%</strong><br>
-        <span style="color:{MUTED};">Casa de apuestas:</span> <strong style="color:{WHITE};">{oname} {impl_prob:.1f}%</strong><br>
-        <span style="color:{MUTED};">Edge detectado:</span> <strong style="color:{GREEN};">+{m['best_edge']*100:.1f}%</strong><br>
-        <span style="color:{MUTED};">Momio:</span> <strong style="color:{WHITE};">{fmt_odds(m['best_odds'])}</strong>
+    # Kelly values
+    kv = m.get("kelly_vals", {})
+    if kv:
+        kelly_html = f"""<div style="background:{SURFACE};border-radius:8px;padding:10px 14px;font-size:12px;font-family:'JetBrains Mono',monospace;margin-bottom:10px;">
+        <span style="color:{MUTED};">Kelly:</span>
+        H {kv.get('H',0)*100:.1f}% · D {kv.get('D',0)*100:.1f}% · A {kv.get('A',0)*100:.1f}%
         </div>"""
+        st.markdown(kelly_html, unsafe_allow_html=True)
 
-        # Bet recommendation with bankroll
-        bet_full = bankroll * m["best_kelly"]
-        bet_min = bet_full * 0.5
-        bet_max = bet_full
-
-        if kelly_pct < 2:
-            rec_cls = "bet-rec bet-red"
-            rec_icon = "NO APUESTES — Edge insuficiente para cubrir varianza"
-            bet_line = ""
-        elif kelly_pct <= 5:
-            rec_cls = "bet-rec bet-yellow"
-            rec_icon = "APUESTA PEQUENA — Riesgo moderado"
-            bet_line = f'<div class="bet-rec-detail">Apostar entre <strong>${bet_min:,.0f}</strong> y <strong>${bet_max:,.0f}</strong> pesos<br>(Kelly {kelly_pct:.1f}% de tu bankroll de ${bankroll:,.0f})</div>'
-        else:
-            rec_cls = "bet-rec bet-green"
-            rec_icon = "APUESTA RECOMENDADA"
-            bet_line = f'<div class="bet-rec-detail">Apostar entre <strong>${bet_min:,.0f}</strong> y <strong>${bet_max:,.0f}</strong> pesos<br>(Kelly {kelly_pct:.1f}% de tu bankroll de ${bankroll:,.0f})</div>'
-
-        html += f"""<div class="{rec_cls}">
-            <div class="bet-rec-title">{rec_icon}</div>
-            {bet_line}
-        </div>"""
-    else:
-        html += '<div class="skip">SKIP — No edge &gt; 5%</div>'
-
-    html += "</div>"
-    return html
-
-
-def render_details(m):
-    """Render match details inside a Streamlit expander."""
+    # Form and stats
     c1, c2 = st.columns(2)
-
     with c1:
         st.markdown(f"**{m['home']}**")
         st.markdown(form_dots(m["home_form"]), unsafe_allow_html=True)
@@ -809,103 +973,6 @@ def render_details(m):
     st.markdown(detail_html, unsafe_allow_html=True)
 
 
-def render_calculadora(m, bankroll):
-    """Calculadora de momio — user inputs their sportsbook odds."""
-    key_base = f"{m['home']}_{m['away']}".replace(" ", "_").replace(".", "")
-
-    # Outcome selector
-    labels = [f"Home ({m['home']})", "Empate", f"Away ({m['away']})"]
-    keys_list = ["H", "D", "A"]
-
-    if m["best_outcome"]:
-        def_idx = keys_list.index(m["best_outcome"])
-    else:
-        def_idx = keys_list.index(max(keys_list, key=lambda k: m["probs"][k]))
-
-    c_sel, c_fmt = st.columns([3, 2])
-    with c_sel:
-        sel_label = st.selectbox(
-            "Resultado a apostar:", labels, index=def_idx, key=f"{key_base}_sel"
-        )
-    outcome_key = keys_list[labels.index(sel_label)]
-    model_prob = m["probs"][outcome_key]
-
-    with c_fmt:
-        momio_fmt = st.radio(
-            "Formato momio:", ["Decimal", "Americano"],
-            horizontal=True, key=f"{key_base}_fmt"
-        )
-
-    if momio_fmt == "Decimal":
-        momio_dec = st.number_input(
-            "Momio actual (decimal):", min_value=1.01, max_value=100.0,
-            value=2.00, step=0.05, format="%.2f", key=f"{key_base}_dec"
-        )
-    else:
-        momio_am = st.number_input(
-            "Momio actual (americano):", min_value=-10000, max_value=10000,
-            value=100, step=5, key=f"{key_base}_am"
-        )
-        if momio_am == 0:
-            st.warning("Momio americano no puede ser 0.")
-            return
-        momio_dec = american_to_decimal(momio_am)
-
-    am_str = decimal_to_american(momio_dec)
-    st.caption(f"{momio_dec:.2f} decimal = {am_str} americano")
-
-    # Calculations
-    implied_prob = 1.0 / momio_dec
-    edge = model_prob - implied_prob
-    edge_pct = edge * 100
-    k = kelly(model_prob, momio_dec)
-    kelly_pct = k * 100
-    stake = bankroll * k
-    win_net = stake * (momio_dec - 1)
-    breakeven_ratio = momio_dec
-
-    # Edge classification
-    if edge_pct > 5:
-        edge_color = GREEN
-        edge_verdict = "✅ Sigue siendo buen bet"
-    elif edge_pct > 2:
-        edge_color = YELLOW
-        edge_verdict = "⚠️ Edge marginal, precaución"
-    else:
-        edge_color = RED
-        edge_verdict = "❌ Con ese momio ya NO conviene apostar"
-
-    # Results display
-    calc_html = f"""<div style="background:{SURFACE};border-radius:8px;padding:14px 18px;
-    font-family:'JetBrains Mono',monospace;font-size:13px;line-height:2.2;">
-    <strong style="color:{WHITE};">Con ese momio:</strong><br>
-    <span style="color:{MUTED};">Edge:</span>
-    <span style="color:{edge_color};font-weight:700;">{edge_pct:+.1f}%</span> {edge_verdict}<br>"""
-
-    if k > 0.001:
-        calc_html += f"""<span style="color:{MUTED};">Apostar:</span>
-    <strong style="color:{WHITE};">${stake:,.0f} pesos</strong>
-    <span style="color:{MUTED};">({kelly_pct:.1f}% de ${bankroll:,.2f})</span><br>
-    <span style="color:{MUTED};">Si ganas:</span>
-    <strong style="color:{GREEN};">+${win_net:,.0f} pesos netos</strong>
-    <span style="color:{MUTED};">(recibes ${stake + win_net:,.0f} total)</span><br>
-    <span style="color:{MUTED};">Si pierdes:</span>
-    <strong style="color:{RED};">-${stake:,.0f} pesos</strong><br>"""
-    else:
-        calc_html += f"""<span style="color:{MUTED};">Apostar:</span>
-    <strong style="color:{RED};">$0 — Kelly no recomienda</strong><br>"""
-
-    calc_html += f"""<span style="color:{MUTED};">Break-even:</span>
-    <span style="color:{WHITE};">necesitas acertar 1 de cada {breakeven_ratio:.1f} veces para ser rentable</span><br>
-    <span style="color:{MUTED};">Prob. mínima:</span>
-    <span style="color:{WHITE};">{implied_prob*100:.1f}%</span>
-    <span style="color:{MUTED};">· Modelo dice:</span>
-    <strong style="color:{WHITE};">{model_prob*100:.1f}%</strong>
-    </div>"""
-
-    st.markdown(calc_html, unsafe_allow_html=True)
-
-
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # MAIN PAGE
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -931,7 +998,7 @@ st.markdown(f"""
 <div class="hero">
     <div class="hero-row">
         <div>
-            <div class="hero-title">⚽ Ligue 1 Predictor</div>
+            <div class="hero-title">Ligue 1 Predictor</div>
             <div class="hero-sub">Stacking Ensemble &middot; LR + RF + XGBoost + MLP &middot; {len(df)} matches trained</div>
         </div>
         <div class="hero-update">
@@ -951,6 +1018,40 @@ if not matches:
     st.warning("No upcoming fixtures found. Run `python src/data/update.py` to fetch data.")
     st.stop()
 
+# ── Sort: BET first (by edge desc), then SKIP ──
+bet_matches = [m for m in matches if m["action"] == "BET"]
+skip_matches = [m for m in matches if m["action"] == "SKIP"]
+bet_matches.sort(key=lambda x: x["bet_edge"], reverse=True)
+skip_matches.sort(key=lambda x: x["date_sort"])
+sorted_matches = bet_matches + skip_matches
+
+n_bet = len(bet_matches)
+n_total = len(matches)
+
+# ── Header: apostable count ──
+if n_bet > 0:
+    header_color = GREEN
+    header_text = f"{n_bet} de {n_total} partidos recomendados"
+else:
+    header_color = MUTED
+    header_text = f"0 de {n_total} partidos recomendados esta jornada"
+
+rounds = sorted(set(m["round"] for m in matches))
+rounds_str = ", ".join(f"J{r}" for r in rounds)
+
+st.markdown(f"""
+<div style="background:{CARD};border:1px solid {BORDER};border-radius:12px;padding:20px 28px;margin-bottom:20px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div>
+            <div style="font-size:24px;font-weight:800;color:{header_color};font-family:'JetBrains Mono',monospace;">
+                {header_text}
+            </div>
+            <div style="font-size:13px;color:{MUTED};margin-top:4px;">Jornada {rounds_str} &middot; Bankroll: ${bankroll:,.2f}</div>
+        </div>
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
 # ── Disclaimer Banner ──
 st.markdown(f"""
 <div class="disclaimer-banner">
@@ -959,70 +1060,23 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# ── Summary Metrics ──
-n_edge = sum(1 for m in matches if m["best_edge"] > 0.05)
-best_edge_match = max(matches, key=lambda x: x["best_edge"])
-best_edge_pct = best_edge_match["best_edge"] * 100
-
-st.markdown(f"""
-<div class="summary-row">
-    <div class="summary-box">
-        <div class="summary-val">{len(matches)}</div>
-        <div class="summary-label">Matches</div>
-    </div>
-    <div class="summary-box">
-        <div class="summary-val" style="color:{GREEN};">{n_edge}</div>
-        <div class="summary-label">With Edge</div>
-    </div>
-    <div class="summary-box">
-        <div class="summary-val" style="color:{BLUE};">{best_edge_pct:.1f}%</div>
-        <div class="summary-label">Best Edge</div>
-    </div>
-    <div class="summary-box">
-        <div class="summary-val" style="color:{GREEN};">55.7%</div>
-        <div class="summary-label">Model Accuracy</div>
-    </div>
-</div>
-""", unsafe_allow_html=True)
-
-st.caption("55.7% Accuracy (vs 33% aleatorio) — En futbol, predecir 1 de cada 3 resultados correctamente es el azar. Nuestro modelo acierta 1 de cada 1.8.")
-
-# ── Sort Toggle ──
-rounds = sorted(set(m["round"] for m in matches))
-rounds_str = ", ".join(f"J{r}" for r in rounds)
-st.markdown(f"### Upcoming Fixtures — {rounds_str}")
-
-sort_mode = st.radio(
-    "Ordenar por:",
-    options=["Fecha", "Edge"],
-    horizontal=True,
-    index=0,
-)
-
-if sort_mode == "Fecha":
-    matches.sort(key=lambda x: x["date_sort"])
-    st.caption("Ordenado por fecha (mas proximo primero). Verde = apuesta recomendada. Gris = skip.")
-else:
-    matches.sort(key=lambda x: x["best_edge"], reverse=True)
-    st.caption("Ordenado por mayor edge. Verde = apuesta recomendada. Gris = skip.")
-
 # ── Match Cards ──
-for m in matches:
-    card_html = render_card_html(m, bankroll)
+for m in sorted_matches:
+    if m["action"] == "BET":
+        card_html = render_bet_card(m, bankroll)
+    else:
+        card_html = render_skip_card(m)
     st.markdown(card_html, unsafe_allow_html=True)
 
-    with st.expander(f"Details — {m['home']} vs {m['away']}"):
+    with st.expander(f"ver detalles — {m['home']} vs {m['away']}"):
         render_details(m)
-
-    with st.expander(f"🧮 Calculadora de Momio — {m['home']} vs {m['away']}"):
-        render_calculadora(m, bankroll)
 
 # ── Footer ──
 st.markdown(f"""
 <div class="foot">
     <strong>Disclaimer:</strong> Este modelo acierta el 55.7% de los partidos en datos historicos.
     Las apuestas deportivas implican riesgo real. Nunca apuestes mas de lo que puedes perder.<br><br>
-    Ligue 1 Predictor v2.0 &middot; Stacking Ensemble (LR + RF + XGB + MLP)
+    Ligue 1 Predictor v3.0 &middot; Stacking Ensemble (LR + RF + XGB + MLP)
     &middot; Data: API-Football 2021-2025 ({len(df)} matches)
 </div>
 """, unsafe_allow_html=True)
