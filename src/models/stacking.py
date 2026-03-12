@@ -56,8 +56,15 @@ def load_data():
         if df[col].isna().any():
             df[col] = df[col].fillna(df[col].median())
 
-    train = df[df["season"].isin([2022, 2023])].copy()
-    test = df[df["season"] == 2024].copy()
+    # Split: 2022-2024 + first 70% of 2025 → train, last 30% of 2025 → test
+    pre_2025 = df[df["season"].isin([2022, 2023, 2024])].copy()
+    season_2025 = df[df["season"] == 2025].sort_values("date").copy()
+    split_idx = int(len(season_2025) * 0.7)
+    s2025_train = season_2025.iloc[:split_idx]
+    s2025_test = season_2025.iloc[split_idx:]
+
+    train = pd.concat([pre_2025, s2025_train])
+    test = s2025_test.copy()
 
     le = LabelEncoder()
     le.classes_ = np.array(LABEL_ORDER)
@@ -199,7 +206,7 @@ def train_stacking():
     brier = _brier_multi(y_test, y_proba)
 
     print(f"\n{'='*60}")
-    print(f"STACKING ENSEMBLE RESULTS (holdout 2024)")
+    print(f"STACKING ENSEMBLE RESULTS (holdout: last 30% of 2025)")
     print(f"{'='*60}")
     print(f"  Accuracy:    {acc:.4f}")
     print(f"  F1 macro:    {f1_mac:.4f}")

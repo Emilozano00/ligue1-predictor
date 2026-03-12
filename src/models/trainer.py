@@ -68,9 +68,15 @@ def load_data():
             median_val = df[col].median()
             df[col] = df[col].fillna(median_val)
 
-    # Split: 2022-2023 train, 2024 test
-    train = df[df["season"].isin([2022, 2023])].copy()
-    test = df[df["season"] == 2024].copy()
+    # Split: 2022-2024 + first 70% of 2025 → train, last 30% of 2025 → test
+    pre_2025 = df[df["season"].isin([2022, 2023, 2024])].copy()
+    season_2025 = df[df["season"] == 2025].sort_values("date").copy()
+    split_idx = int(len(season_2025) * 0.7)
+    s2025_train = season_2025.iloc[:split_idx]
+    s2025_test = season_2025.iloc[split_idx:]
+
+    train = pd.concat([pre_2025, s2025_train])
+    test = s2025_test.copy()
 
     X_train = train[feat_cols].values
     X_test = test[feat_cols].values
@@ -81,8 +87,11 @@ def load_data():
     y_test = le.transform(test["result"].values)
 
     print(f"Features: {len(feat_cols)}")
-    print(f"Train: {len(train)} matches (2022-2023)")
-    print(f"Test:  {len(test)} matches (2024)")
+    print(f"Train: {len(train)} matches (2022-2024 + 70% of 2025)")
+    print(f"  Last train match: {train['date'].max()}  {train.iloc[-1]['home_team']} vs {train.iloc[-1]['away_team']}")
+    print(f"Test:  {len(test)} matches (last 30% of 2025)")
+    print(f"  First test match: {test['date'].min()}  {test.iloc[0]['home_team']} vs {test.iloc[0]['away_team']}")
+    print(f"  Last test match:  {test['date'].max()}  {test.iloc[-1]['home_team']} vs {test.iloc[-1]['away_team']}")
     print(f"Train target dist: {dict(zip(*np.unique(y_train, return_counts=True)))}")
     print(f"Test  target dist: {dict(zip(*np.unique(y_test, return_counts=True)))}")
 
