@@ -1,5 +1,11 @@
 .env
-data/raw/
+data/raw/*
+!data/raw/fixtures/
+data/raw/fixtures/*
+!data/raw/fixtures/upcoming.json
+!data/raw/odds/
+data/raw/odds/*
+!data/raw/odds/upcoming_odds.json
 __pycache__/
 *.pyc
 .DS_Store
