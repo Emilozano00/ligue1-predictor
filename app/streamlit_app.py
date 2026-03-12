@@ -1,22 +1,20 @@
 """
-Ligue 1 Predictor — Streamlit App
-3 pages: Predictor, Model Comparison, Bankroll Tracker
+Ligue 1 Predictor — Premium Betting Analytics Platform
 """
 
+import json
 import os
 import sys
 import warnings
+from datetime import datetime
+from pathlib import Path
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 warnings.filterwarnings("ignore")
 
-from pathlib import Path
-
 import joblib
 import numpy as np
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
 import streamlit as st
 
 # ── Paths ──
@@ -25,86 +23,356 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 FEATURES_PATH = PROJECT_ROOT / "data" / "processed" / "features.parquet"
 MODELS_DIR = PROJECT_ROOT / "models" / "saved"
-BANKROLL_PATH = PROJECT_ROOT / "data" / "bankroll.csv"
+UPCOMING_PATH = PROJECT_ROOT / "data" / "raw" / "fixtures" / "upcoming.json"
+ODDS_PATH = PROJECT_ROOT / "data" / "raw" / "odds" / "upcoming_odds.json"
 
-# ── Colors ──
-GREEN = "#00C853"
-YELLOW = "#FFD600"
-RED = "#D50000"
-BG_DARK = "#0E1117"
-CARD_BG = "#1A1D23"
-TEXT = "#FAFAFA"
-TEXT_MUTED = "#8B949E"
+# ── Design Tokens ──
+BG = "#0A0E1A"
+CARD = "#111827"
+BORDER = "#1F2937"
+SURFACE = "#1E293B"
+BLUE = "#3B82F6"
+GREEN = "#10B981"
+RED = "#EF4444"
+YELLOW = "#F59E0B"
+WHITE = "#F9FAFB"
+MUTED = "#6B7280"
+SUBTLE = "#374151"
 
 LABEL_ORDER = ["H", "D", "A"]
-LABEL_NAMES = {"H": "Local", "D": "Empate", "A": "Visita"}
-LABEL_COLORS = {"H": GREEN, "D": YELLOW, "A": RED}
+LABEL_NAMES = {"H": "Home", "D": "Draw", "A": "Away"}
 
-# ── Page config ──
+# ── Page Config ──
 st.set_page_config(
     page_title="Ligue 1 Predictor",
     page_icon="⚽",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
-# ── Custom CSS ──
+# ── CSS ──
 st.markdown(f"""
 <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
     .stApp {{
-        background-color: {BG_DARK};
-        color: {TEXT};
+        background-color: {BG};
+        color: {WHITE};
+        font-family: 'Inter', -apple-system, sans-serif;
     }}
-    .metric-card {{
-        background: {CARD_BG};
+    #MainMenu, footer, header {{visibility: hidden;}}
+    .block-container {{padding-top: 1rem; max-width: 1100px;}}
+
+    /* Hero */
+    .hero {{
+        background: linear-gradient(135deg, {CARD} 0%, {SURFACE} 100%);
+        border: 1px solid {BORDER};
+        border-radius: 16px;
+        padding: 28px 36px;
+        margin-bottom: 20px;
+    }}
+    .hero-row {{
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }}
+    .hero-title {{
+        font-size: 32px;
+        font-weight: 900;
+        letter-spacing: -0.5px;
+    }}
+    .hero-sub {{
+        font-size: 13px;
+        color: {MUTED};
+        margin-top: 2px;
+    }}
+    .hero-update {{
+        font-size: 12px;
+        color: {MUTED};
+        text-align: right;
+    }}
+    .hero-update strong {{ color: {GREEN}; }}
+
+    /* Summary Row */
+    .summary-row {{
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 12px;
+        margin-bottom: 24px;
+    }}
+    .summary-box {{
+        background: {CARD};
+        border: 1px solid {BORDER};
         border-radius: 12px;
-        padding: 20px;
+        padding: 16px 20px;
         text-align: center;
-        border: 1px solid #30363D;
     }}
-    .prob-bar {{
+    .summary-val {{
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 26px;
+        font-weight: 800;
+    }}
+    .summary-label {{
+        font-size: 11px;
+        color: {MUTED};
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        margin-top: 4px;
+    }}
+
+    /* Match Card */
+    .mc {{
+        background: {CARD};
+        border: 1px solid {BORDER};
+        border-radius: 14px;
+        padding: 22px 26px;
+        margin-bottom: 14px;
+    }}
+    .mc-edge {{ border-left: 4px solid {GREEN}; }}
+    .mc-skip {{ border-left: 4px solid {SUBTLE}; opacity: 0.7; }}
+
+    .mc-head {{
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 14px;
+    }}
+    .mc-date {{
+        font-size: 13px;
+        color: {MUTED};
+    }}
+    .mc-round {{
+        font-size: 11px;
+        color: {MUTED};
+        background: {SURFACE};
+        padding: 3px 10px;
+        border-radius: 20px;
+    }}
+
+    /* Teams */
+    .teams {{
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 20px;
+        margin-bottom: 18px;
+    }}
+    .tm {{
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex: 1;
+    }}
+    .tm-h {{ justify-content: flex-end; text-align: right; }}
+    .tm-a {{ justify-content: flex-start; }}
+    .tm-name {{
+        font-size: 18px;
+        font-weight: 700;
+    }}
+    .tm-logo {{
+        width: 36px;
+        height: 36px;
+    }}
+    .vs {{
+        font-size: 13px;
+        font-weight: 600;
+        color: {MUTED};
+        background: {SURFACE};
+        padding: 4px 10px;
+        border-radius: 6px;
+    }}
+
+    /* Probability Bar */
+    .pb {{
         height: 40px;
         border-radius: 8px;
         display: flex;
         overflow: hidden;
         font-weight: 700;
-        font-size: 14px;
+        font-size: 12px;
+        font-family: 'JetBrains Mono', monospace;
+        margin-bottom: 14px;
     }}
-    .prob-segment {{
+    .pb > div {{
         display: flex;
         align-items: center;
         justify-content: center;
-        color: #000;
-        min-width: 30px;
+        min-width: 36px;
+    }}
+
+    /* Odds Grid */
+    .og {{
+        display: grid;
+        grid-template-columns: 70px minmax(0,1fr) minmax(0,1fr) minmax(0,1fr);
+        gap: 2px 8px;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 12px;
+        background: {SURFACE};
+        border-radius: 8px;
+        padding: 10px 14px;
+        margin-bottom: 14px;
+    }}
+    .og-h {{
+        color: {MUTED};
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        padding-bottom: 6px;
+        border-bottom: 1px solid {BORDER};
+    }}
+    .og-c {{ padding: 5px 0; text-align: center; }}
+    .og-l {{ text-align: left; color: {MUTED}; padding: 5px 0; }}
+    .og-pos {{ color: {GREEN}; font-weight: 700; }}
+    .og-neg {{ color: {MUTED}; }}
+
+    /* Edge + Kelly */
+    .edge-tag {{
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: {GREEN}15;
+        border: 1px solid {GREEN}40;
+        border-radius: 8px;
+        padding: 6px 14px;
+        font-size: 13px;
+        font-weight: 700;
+        color: {GREEN};
+        font-family: 'JetBrains Mono', monospace;
+    }}
+    .kelly {{
+        background: linear-gradient(135deg, #064E3B, #065F46);
+        border: 1px solid {GREEN}30;
+        border-radius: 10px;
+        padding: 14px 20px;
+        margin-top: 10px;
+        display: flex;
+        align-items: center;
+        gap: 14px;
+    }}
+    .kelly-val {{
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 22px;
+        font-weight: 800;
+        color: {GREEN};
+    }}
+    .kelly-txt {{
+        font-size: 13px;
+        color: #9CA3AF;
+    }}
+    .kelly-txt strong {{ color: {WHITE}; }}
+    .skip {{
+        background: {SURFACE};
+        border: 1px solid {BORDER};
+        border-radius: 8px;
+        padding: 10px 18px;
+        margin-top: 10px;
+        color: {MUTED};
+        font-size: 13px;
+        text-align: center;
+    }}
+
+    /* Details */
+    .det-grid {{
+        display: grid;
+        grid-template-columns: 1fr 80px 1fr;
+        gap: 6px;
+        font-size: 12px;
+    }}
+    .det-l {{
+        text-align: right;
+        font-family: 'JetBrains Mono', monospace;
+    }}
+    .det-c {{
+        text-align: center;
+        color: {MUTED};
+        font-size: 11px;
+    }}
+    .det-r {{
+        text-align: left;
+        font-family: 'JetBrains Mono', monospace;
+    }}
+    .det-sep {{
+        grid-column: 1 / -1;
+        border-top: 1px solid {BORDER};
+        margin: 2px 0;
     }}
     .form-dot {{
         display: inline-block;
-        width: 24px;
-        height: 24px;
+        width: 20px;
+        height: 20px;
         border-radius: 50%;
         text-align: center;
-        line-height: 24px;
+        line-height: 20px;
+        font-size: 9px;
+        font-weight: 800;
+        margin: 1px;
+    }}
+
+    /* Bet Recommendation */
+    .bet-rec {{
+        border-radius: 10px;
+        padding: 14px 20px;
+        margin-top: 10px;
+        font-family: 'JetBrains Mono', monospace;
+    }}
+    .bet-green {{
+        background: linear-gradient(135deg, #064E3B, #065F46);
+        border: 1px solid {GREEN}30;
+        color: {GREEN};
+    }}
+    .bet-yellow {{
+        background: linear-gradient(135deg, #78350F, #92400E);
+        border: 1px solid {YELLOW}30;
+        color: {YELLOW};
+    }}
+    .bet-red {{
+        background: linear-gradient(135deg, #7F1D1D, #991B1B);
+        border: 1px solid {RED}30;
+        color: {RED};
+    }}
+    .bet-rec-title {{
+        font-size: 15px;
+        font-weight: 800;
+        margin-bottom: 4px;
+    }}
+    .bet-rec-detail {{
+        font-size: 13px;
+        color: #9CA3AF;
+    }}
+    .bet-rec-detail strong {{ color: {WHITE}; }}
+
+    /* Disclaimer banner */
+    .disclaimer-banner {{
+        background: {SURFACE};
+        border: 1px solid {YELLOW}40;
+        border-radius: 10px;
+        padding: 14px 20px;
+        margin-bottom: 20px;
+        font-size: 13px;
+        color: {YELLOW};
+        text-align: center;
+    }}
+
+    /* Footer */
+    .foot {{
+        text-align: center;
+        color: {MUTED};
         font-size: 11px;
-        font-weight: 700;
-        margin: 2px;
-        color: #000;
+        margin-top: 40px;
+        padding: 20px;
+        border-top: 1px solid {BORDER};
     }}
-    .kelly-box {{
-        background: linear-gradient(135deg, #1B5E20, #2E7D32);
-        border-radius: 12px;
-        padding: 16px 24px;
-        margin: 8px 0;
-        font-size: 18px;
-        font-weight: 700;
-        color: white;
+
+    /* Streamlit overrides */
+    div[data-testid="stExpander"] {{
+        background: {SURFACE};
+        border: 1px solid {BORDER};
+        border-radius: 8px;
+        margin-bottom: 14px;
     }}
-    .no-edge-box {{
-        background: {CARD_BG};
-        border: 1px solid #30363D;
-        border-radius: 12px;
-        padding: 16px 24px;
-        margin: 8px 0;
-        color: {TEXT_MUTED};
+    div[data-testid="stExpander"] summary {{
+        font-size: 13px;
+        color: {MUTED};
     }}
 </style>
 """, unsafe_allow_html=True)
@@ -117,9 +385,7 @@ st.markdown(f"""
 
 @st.cache_data
 def load_features():
-    df = pd.read_parquet(FEATURES_PATH)
-    df = df[df["season"] >= 2022].copy()
-    return df
+    return pd.read_parquet(FEATURES_PATH)
 
 
 @st.cache_resource
@@ -132,34 +398,33 @@ def load_stacking():
     return config, meta, bases
 
 
-@st.cache_data
-def load_comparison():
-    return pd.read_csv(MODELS_DIR / "comparison.csv")
+def load_upcoming():
+    if not UPCOMING_PATH.exists():
+        return []
+    with open(UPCOMING_PATH) as f:
+        return json.load(f)
 
 
-@st.cache_data
-def get_teams(df):
-    latest_season = df["season"].max()
-    latest = df[df["season"] == latest_season]
-    teams = sorted(set(latest["home_team"].unique()) | set(latest["away_team"].unique()))
-    return teams
+def load_odds():
+    if not ODDS_PATH.exists():
+        return {}
+    with open(ODDS_PATH) as f:
+        return json.load(f)
 
 
-def get_team_form(df, team_name, n=5):
-    """Get last N results for a team."""
-    mask = (df["home_team"] == team_name) | (df["away_team"] == team_name)
-    team_matches = df[mask].sort_values("date").tail(n)
-    results = []
-    for _, row in team_matches.iterrows():
-        if row["home_team"] == team_name:
-            results.append(row["result"])
-        else:
-            results.append({"H": "A", "D": "D", "A": "H"}[row["result"]])
-    return results
+def get_last_update():
+    if UPCOMING_PATH.exists():
+        mtime = os.path.getmtime(UPCOMING_PATH)
+        return datetime.fromtimestamp(mtime).strftime("%b %d, %Y %H:%M")
+    return "N/A"
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# PREDICTION LOGIC
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
 def get_team_latest_features(df, team_id, is_home=True):
-    """Get the most recent rolling features for a team."""
     prefix = "home" if is_home else "away"
     id_col = f"{prefix}_team_id"
     matches = df[df[id_col] == team_id].sort_values("date")
@@ -168,10 +433,14 @@ def get_team_latest_features(df, team_id, is_home=True):
     return matches.iloc[-1]
 
 
-def build_feature_vector(df, feat_cols, home_team, away_team):
-    """Build feature vector for a prediction from latest available data."""
-    home_id = df[df["home_team"] == home_team]["home_team_id"].iloc[0]
-    away_id = df[df["away_team"] == away_team]["away_team_id"].iloc[0]
+def build_feature_vector(df, feat_cols, home_name, away_name):
+    home_rows = df[df["home_team"] == home_name]
+    away_rows = df[df["away_team"] == away_name]
+    if len(home_rows) == 0 or len(away_rows) == 0:
+        return None
+
+    home_id = home_rows["home_team_id"].iloc[0]
+    away_id = away_rows["away_team_id"].iloc[0]
 
     latest_home = get_team_latest_features(df, home_id, is_home=True)
     latest_away = get_team_latest_features(df, away_id, is_home=False)
@@ -192,7 +461,6 @@ def build_feature_vector(df, feat_cols, home_team, away_team):
         else:
             vector[col] = np.nan
 
-    # Fill NaN with median from training data
     series = pd.Series(vector)
     for col in series.index:
         if pd.isna(series[col]):
@@ -202,9 +470,7 @@ def build_feature_vector(df, feat_cols, home_team, away_team):
     return series[feat_cols].values.astype(np.float64).reshape(1, -1)
 
 
-def predict_match(X):
-    """Run stacking ensemble prediction."""
-    config, meta, bases = load_stacking()
+def predict_match(X, config, meta, bases):
     meta_features = []
     for name in config["base_model_names"]:
         meta_features.append(bases[name].predict_proba(X))
@@ -213,436 +479,550 @@ def predict_match(X):
     return dict(zip(LABEL_ORDER, proba))
 
 
-def kelly_criterion(prob_model, odds_decimal):
-    """Kelly fraction: f* = (p * odds - 1) / (odds - 1)"""
-    if odds_decimal <= 1:
+def get_team_form(df, team_name, n=5):
+    mask = (df["home_team"] == team_name) | (df["away_team"] == team_name)
+    team_matches = df[mask].sort_values("date").tail(n)
+    results = []
+    for _, row in team_matches.iterrows():
+        if row["home_team"] == team_name:
+            results.append(row["result"])
+        else:
+            results.append({"H": "A", "D": "D", "A": "H"}[row["result"]])
+    return results
+
+
+def get_team_elo(df, team_name):
+    hm = df[df["home_team"] == team_name].sort_values("date")
+    am = df[df["away_team"] == team_name].sort_values("date")
+    latest_h = hm.iloc[-1] if len(hm) > 0 else None
+    latest_a = am.iloc[-1] if len(am) > 0 else None
+    if latest_h is not None and latest_a is not None:
+        if latest_h["date"] >= latest_a["date"]:
+            return latest_h["home_elo"]
+        return latest_a["away_elo"]
+    if latest_h is not None:
+        return latest_h["home_elo"]
+    if latest_a is not None:
+        return latest_a["away_elo"]
+    return 1500
+
+
+def get_team_stats(df, team_name):
+    hm = df[df["home_team"] == team_name].sort_values("date")
+    am = df[df["away_team"] == team_name].sort_values("date")
+    latest_h = hm.iloc[-1] if len(hm) > 0 else None
+    latest_a = am.iloc[-1] if len(am) > 0 else None
+
+    if latest_h is not None and latest_a is not None:
+        if latest_h["date"] >= latest_a["date"]:
+            r, p = latest_h, "home"
+        else:
+            r, p = latest_a, "away"
+    elif latest_h is not None:
+        r, p = latest_h, "home"
+    elif latest_a is not None:
+        r, p = latest_a, "away"
+    else:
+        return {}
+
+    return {
+        "goals": r.get(f"{p}_goals_avg", 0),
+        "xg": r.get(f"{p}_xg_avg", 0),
+        "pts": r.get(f"{p}_points_last_n", 0),
+        "gd": r.get(f"{p}_goal_diff_rolling", 0),
+        "sot": r.get(f"{p}_shots_on_target_avg", 0),
+        "poss": r.get(f"{p}_possession_avg", 0),
+    }
+
+
+def kelly(prob, odds):
+    if odds <= 1:
         return 0.0
-    f = (prob_model * odds_decimal - 1) / (odds_decimal - 1)
-    return max(0.0, f)
+    return max(0.0, (prob * odds - 1) / (odds - 1))
 
 
-def render_form_dots(results):
-    """Render W/D/L dots for form."""
+def decimal_to_american(decimal_odds):
+    if decimal_odds >= 2.0:
+        return f"+{(decimal_odds - 1) * 100:.0f}"
+    else:
+        return f"{-100 / (decimal_odds - 1):.0f}"
+
+
+def american_to_decimal(american_odds):
+    if american_odds > 0:
+        return american_odds / 100.0 + 1.0
+    elif american_odds < 0:
+        return 100.0 / abs(american_odds) + 1.0
+    return 1.0
+
+
+def fmt_odds(decimal_odds):
+    return f"{decimal_odds:.2f} / {decimal_to_american(decimal_odds)}"
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ANALYSIS
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+def analyze_all(df, config, meta, bases, upcoming, odds_data):
+    feat_cols = config["feature_cols"]
+    results = []
+
+    for fx in upcoming:
+        home = fx["teams"]["home"]["name"]
+        away = fx["teams"]["away"]["name"]
+        fid = str(fx["fixture"]["id"])
+
+        X = build_feature_vector(df, feat_cols, home, away)
+        if X is None:
+            continue
+
+        probs = predict_match(X, config, meta, bases)
+        odds_match = odds_data.get(fid, {})
+        oh = odds_match.get("home")
+        od = odds_match.get("draw")
+        oa = odds_match.get("away")
+
+        best_edge = 0.0
+        best_outcome = None
+        best_kelly = 0.0
+        best_odds = 0.0
+        edges = {}
+
+        if oh and od and oa:
+            tot = 1 / oh + 1 / od + 1 / oa
+            impl = {"H": (1 / oh) / tot, "D": (1 / od) / tot, "A": (1 / oa) / tot}
+            odds_map = {"H": oh, "D": od, "A": oa}
+            for o in LABEL_ORDER:
+                edges[o] = probs[o] - impl[o]
+                k = kelly(probs[o], odds_map[o])
+                if edges[o] > best_edge:
+                    best_edge = edges[o]
+                    best_outcome = o
+                    best_kelly = k
+                    best_odds = odds_map[o]
+
+        round_str = fx["league"].get("round", "")
+        round_num = round_str.split(" - ")[-1] if " - " in round_str else round_str
+
+        results.append({
+            "home": home,
+            "away": away,
+            "home_logo": fx["teams"]["home"]["logo"],
+            "away_logo": fx["teams"]["away"]["logo"],
+            "date": fx["fixture"].get("date_display", ""),
+            "date_sort": fx["fixture"].get("date", ""),
+            "round": round_num,
+            "probs": probs,
+            "oh": oh, "od": od, "oa": oa,
+            "bookie": odds_match.get("bookmaker", ""),
+            "edges": edges,
+            "best_edge": best_edge,
+            "best_outcome": best_outcome,
+            "best_kelly": best_kelly,
+            "best_odds": best_odds,
+            "home_form": get_team_form(df, home),
+            "away_form": get_team_form(df, away),
+            "home_elo": get_team_elo(df, home),
+            "away_elo": get_team_elo(df, away),
+            "home_stats": get_team_stats(df, home),
+            "away_stats": get_team_stats(df, away),
+        })
+
+    return results
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# RENDERING
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+def form_dots(results):
+    colors = {"H": GREEN, "D": YELLOW, "A": RED}
+    letters = {"H": "W", "D": "D", "A": "L"}
+    text_colors = {"H": "#000", "D": "#000", "A": "#fff"}
     html = ""
     for r in results:
-        if r == "H":
-            html += f'<span class="form-dot" style="background:{GREEN}">W</span>'
-        elif r == "D":
-            html += f'<span class="form-dot" style="background:{YELLOW}">D</span>'
-        else:
-            html += f'<span class="form-dot" style="background:{RED}">L</span>'
+        html += f'<span class="form-dot" style="background:{colors[r]};color:{text_colors[r]};">{letters[r]}</span>'
     return html
 
 
+def render_card_html(m, bankroll):
+    has_edge = m["best_edge"] > 0.05
+    cls = "mc mc-edge" if has_edge else "mc mc-skip"
+
+    html = f"""<div class="{cls}">
+    <div class="mc-head">
+        <span class="mc-date">{m['date']} (CDMX)</span>
+        <span class="mc-round">Jornada {m['round']}</span>
+    </div>
+    <div class="teams">
+        <div class="tm tm-h">
+            <span class="tm-name">{m['home']}</span>
+            <img class="tm-logo" src="{m['home_logo']}" alt="">
+        </div>
+        <span class="vs">VS</span>
+        <div class="tm tm-a">
+            <img class="tm-logo" src="{m['away_logo']}" alt="">
+            <span class="tm-name">{m['away']}</span>
+        </div>
+    </div>
+    <div class="pb">
+        <div style="width:{m['probs']['H']*100:.0f}%;background:{BLUE};">H {m['probs']['H']*100:.0f}%</div>
+        <div style="width:{m['probs']['D']*100:.0f}%;background:{YELLOW};color:#000;">D {m['probs']['D']*100:.0f}%</div>
+        <div style="width:{m['probs']['A']*100:.0f}%;background:{RED};">A {m['probs']['A']*100:.0f}%</div>
+    </div>"""
+
+    if m["oh"] and m["od"] and m["oa"]:
+        tot = 1 / m["oh"] + 1 / m["od"] + 1 / m["oa"]
+        ih = (1 / m["oh"]) / tot * 100
+        id_ = (1 / m["od"]) / tot * 100
+        ia = (1 / m["oa"]) / tot * 100
+        e = m["edges"]
+
+        def ec(v):
+            return "og-pos" if v > 0 else "og-neg"
+
+        html += f"""<div class="og">
+        <div class="og-h"></div>
+        <div class="og-h" style="text-align:center">Home</div>
+        <div class="og-h" style="text-align:center">Draw</div>
+        <div class="og-h" style="text-align:center">Away</div>
+        <div class="og-l">Modelo</div>
+        <div class="og-c">{m['probs']['H']*100:.1f}%</div>
+        <div class="og-c">{m['probs']['D']*100:.1f}%</div>
+        <div class="og-c">{m['probs']['A']*100:.1f}%</div>
+        <div class="og-l">Odds</div>
+        <div class="og-c">{fmt_odds(m['oh'])}</div>
+        <div class="og-c">{fmt_odds(m['od'])}</div>
+        <div class="og-c">{fmt_odds(m['oa'])}</div>
+        <div class="og-l">Casa</div>
+        <div class="og-c">{ih:.1f}%</div>
+        <div class="og-c">{id_:.1f}%</div>
+        <div class="og-c">{ia:.1f}%</div>
+        <div class="og-l">Edge</div>
+        <div class="og-c {ec(e.get('H',0))}">{e.get('H',0)*100:+.1f}%</div>
+        <div class="og-c {ec(e.get('D',0))}">{e.get('D',0)*100:+.1f}%</div>
+        <div class="og-c {ec(e.get('A',0))}">{e.get('A',0)*100:+.1f}%</div>
+        </div>"""
+
+    if has_edge:
+        oname = LABEL_NAMES[m["best_outcome"]]
+        kelly_pct = m["best_kelly"] * 100
+        model_prob = m["probs"][m["best_outcome"]] * 100
+        # Implied probability from bookmaker
+        impl_prob = (1 / m["best_odds"]) / (1 / m["oh"] + 1 / m["od"] + 1 / m["oa"]) * 100
+
+        html += f"""<div style="background:{SURFACE};border-radius:8px;padding:14px 18px;margin-bottom:10px;font-size:13px;line-height:1.8;">
+        <span style="color:{MUTED};">Nuestro modelo:</span> <strong style="color:{WHITE};">{oname} {model_prob:.1f}%</strong><br>
+        <span style="color:{MUTED};">Casa de apuestas:</span> <strong style="color:{WHITE};">{oname} {impl_prob:.1f}%</strong><br>
+        <span style="color:{MUTED};">Edge detectado:</span> <strong style="color:{GREEN};">+{m['best_edge']*100:.1f}%</strong><br>
+        <span style="color:{MUTED};">Momio:</span> <strong style="color:{WHITE};">{fmt_odds(m['best_odds'])}</strong>
+        </div>"""
+
+        # Bet recommendation with bankroll
+        bet_full = bankroll * m["best_kelly"]
+        bet_min = bet_full * 0.5
+        bet_max = bet_full
+
+        if kelly_pct < 2:
+            rec_cls = "bet-rec bet-red"
+            rec_icon = "NO APUESTES — Edge insuficiente para cubrir varianza"
+            bet_line = ""
+        elif kelly_pct <= 5:
+            rec_cls = "bet-rec bet-yellow"
+            rec_icon = "APUESTA PEQUENA — Riesgo moderado"
+            bet_line = f'<div class="bet-rec-detail">Apostar entre <strong>${bet_min:,.0f}</strong> y <strong>${bet_max:,.0f}</strong> pesos<br>(Kelly {kelly_pct:.1f}% de tu bankroll de ${bankroll:,.0f})</div>'
+        else:
+            rec_cls = "bet-rec bet-green"
+            rec_icon = "APUESTA RECOMENDADA"
+            bet_line = f'<div class="bet-rec-detail">Apostar entre <strong>${bet_min:,.0f}</strong> y <strong>${bet_max:,.0f}</strong> pesos<br>(Kelly {kelly_pct:.1f}% de tu bankroll de ${bankroll:,.0f})</div>'
+
+        html += f"""<div class="{rec_cls}">
+            <div class="bet-rec-title">{rec_icon}</div>
+            {bet_line}
+        </div>"""
+    else:
+        html += '<div class="skip">SKIP — No edge &gt; 5%</div>'
+
+    html += "</div>"
+    return html
+
+
+def render_details(m):
+    """Render match details inside a Streamlit expander."""
+    c1, c2 = st.columns(2)
+
+    with c1:
+        st.markdown(f"**{m['home']}**")
+        st.markdown(form_dots(m["home_form"]), unsafe_allow_html=True)
+        wins = sum(1 for r in m["home_form"] if r == "H")
+        draws = sum(1 for r in m["home_form"] if r == "D")
+        losses = sum(1 for r in m["home_form"] if r == "A")
+        st.caption(f"{wins}W {draws}D {losses}L")
+
+    with c2:
+        st.markdown(f"**{m['away']}**")
+        st.markdown(form_dots(m["away_form"]), unsafe_allow_html=True)
+        wins = sum(1 for r in m["away_form"] if r == "H")
+        draws = sum(1 for r in m["away_form"] if r == "D")
+        losses = sum(1 for r in m["away_form"] if r == "A")
+        st.caption(f"{wins}W {draws}D {losses}L")
+
+    hs = m["home_stats"]
+    aws = m["away_stats"]
+
+    def fmt(v):
+        if v is None or (isinstance(v, float) and np.isnan(v)):
+            return "—"
+        if isinstance(v, float):
+            return f"{v:.1f}" if v != int(v) else f"{int(v)}"
+        return str(v)
+
+    detail_html = f"""<div class="det-grid">
+    <div class="det-l" style="font-weight:700;color:{GREEN};">{m['home_elo']:.0f}</div>
+    <div class="det-c">ELO</div>
+    <div class="det-r" style="font-weight:700;color:{BLUE};">{m['away_elo']:.0f}</div>
+    <div class="det-sep"></div>
+    <div class="det-l">{fmt(hs.get('goals'))}</div>
+    <div class="det-c">Goals/g</div>
+    <div class="det-r">{fmt(aws.get('goals'))}</div>
+    <div class="det-l">{fmt(hs.get('xg'))}</div>
+    <div class="det-c">xG/g</div>
+    <div class="det-r">{fmt(aws.get('xg'))}</div>
+    <div class="det-sep"></div>
+    <div class="det-l">{fmt(hs.get('pts'))}</div>
+    <div class="det-c">Pts L5</div>
+    <div class="det-r">{fmt(aws.get('pts'))}</div>
+    <div class="det-l">{fmt(hs.get('gd'))}</div>
+    <div class="det-c">GD L5</div>
+    <div class="det-r">{fmt(aws.get('gd'))}</div>
+    <div class="det-sep"></div>
+    <div class="det-l">{fmt(hs.get('sot'))}</div>
+    <div class="det-c">SoT/g</div>
+    <div class="det-r">{fmt(aws.get('sot'))}</div>
+    <div class="det-l">{fmt(hs.get('poss'))}</div>
+    <div class="det-c">Poss %</div>
+    <div class="det-r">{fmt(aws.get('poss'))}</div>
+    </div>"""
+    st.markdown(detail_html, unsafe_allow_html=True)
+
+
+def render_calculadora(m, bankroll):
+    """Calculadora de momio — user inputs their sportsbook odds."""
+    key_base = f"{m['home']}_{m['away']}".replace(" ", "_").replace(".", "")
+
+    # Outcome selector
+    labels = [f"Home ({m['home']})", "Empate", f"Away ({m['away']})"]
+    keys_list = ["H", "D", "A"]
+
+    if m["best_outcome"]:
+        def_idx = keys_list.index(m["best_outcome"])
+    else:
+        def_idx = keys_list.index(max(keys_list, key=lambda k: m["probs"][k]))
+
+    c_sel, c_fmt = st.columns([3, 2])
+    with c_sel:
+        sel_label = st.selectbox(
+            "Resultado a apostar:", labels, index=def_idx, key=f"{key_base}_sel"
+        )
+    outcome_key = keys_list[labels.index(sel_label)]
+    model_prob = m["probs"][outcome_key]
+
+    with c_fmt:
+        momio_fmt = st.radio(
+            "Formato momio:", ["Decimal", "Americano"],
+            horizontal=True, key=f"{key_base}_fmt"
+        )
+
+    if momio_fmt == "Decimal":
+        momio_dec = st.number_input(
+            "Momio actual (decimal):", min_value=1.01, max_value=100.0,
+            value=2.00, step=0.05, format="%.2f", key=f"{key_base}_dec"
+        )
+    else:
+        momio_am = st.number_input(
+            "Momio actual (americano):", min_value=-10000, max_value=10000,
+            value=100, step=5, key=f"{key_base}_am"
+        )
+        if momio_am == 0:
+            st.warning("Momio americano no puede ser 0.")
+            return
+        momio_dec = american_to_decimal(momio_am)
+
+    am_str = decimal_to_american(momio_dec)
+    st.caption(f"{momio_dec:.2f} decimal = {am_str} americano")
+
+    # Calculations
+    implied_prob = 1.0 / momio_dec
+    edge = model_prob - implied_prob
+    edge_pct = edge * 100
+    k = kelly(model_prob, momio_dec)
+    kelly_pct = k * 100
+    stake = bankroll * k
+    win_net = stake * (momio_dec - 1)
+    breakeven_ratio = momio_dec
+
+    # Edge classification
+    if edge_pct > 5:
+        edge_color = GREEN
+        edge_verdict = "✅ Sigue siendo buen bet"
+    elif edge_pct > 2:
+        edge_color = YELLOW
+        edge_verdict = "⚠️ Edge marginal, precaución"
+    else:
+        edge_color = RED
+        edge_verdict = "❌ Con ese momio ya NO conviene apostar"
+
+    # Results display
+    calc_html = f"""<div style="background:{SURFACE};border-radius:8px;padding:14px 18px;
+    font-family:'JetBrains Mono',monospace;font-size:13px;line-height:2.2;">
+    <strong style="color:{WHITE};">Con ese momio:</strong><br>
+    <span style="color:{MUTED};">Edge:</span>
+    <span style="color:{edge_color};font-weight:700;">{edge_pct:+.1f}%</span> {edge_verdict}<br>"""
+
+    if k > 0.001:
+        calc_html += f"""<span style="color:{MUTED};">Apostar:</span>
+    <strong style="color:{WHITE};">${stake:,.0f} pesos</strong>
+    <span style="color:{MUTED};">({kelly_pct:.1f}% de ${bankroll:,.2f})</span><br>
+    <span style="color:{MUTED};">Si ganas:</span>
+    <strong style="color:{GREEN};">+${win_net:,.0f} pesos netos</strong>
+    <span style="color:{MUTED};">(recibes ${stake + win_net:,.0f} total)</span><br>
+    <span style="color:{MUTED};">Si pierdes:</span>
+    <strong style="color:{RED};">-${stake:,.0f} pesos</strong><br>"""
+    else:
+        calc_html += f"""<span style="color:{MUTED};">Apostar:</span>
+    <strong style="color:{RED};">$0 — Kelly no recomienda</strong><br>"""
+
+    calc_html += f"""<span style="color:{MUTED};">Break-even:</span>
+    <span style="color:{WHITE};">necesitas acertar 1 de cada {breakeven_ratio:.1f} veces para ser rentable</span><br>
+    <span style="color:{MUTED};">Prob. mínima:</span>
+    <span style="color:{WHITE};">{implied_prob*100:.1f}%</span>
+    <span style="color:{MUTED};">· Modelo dice:</span>
+    <strong style="color:{WHITE};">{model_prob*100:.1f}%</strong>
+    </div>"""
+
+    st.markdown(calc_html, unsafe_allow_html=True)
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# SIDEBAR NAVIGATION
+# MAIN PAGE
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-st.sidebar.title("Ligue 1 Predictor")
-st.sidebar.markdown("---")
-page = st.sidebar.radio(
-    "Navegacion",
-    ["Predictor", "Comparacion de Modelos", "Bankroll Tracker"],
-    label_visibility="collapsed",
+df = load_features()
+config, meta, bases = load_stacking()
+upcoming = load_upcoming()
+odds_data = load_odds()
+last_update = get_last_update()
+
+# ── Sidebar: Bankroll ──
+with st.sidebar:
+    bankroll = st.number_input(
+        "Mi bankroll (MXN $)",
+        min_value=100.0,
+        max_value=1_000_000.0,
+        value=668.93,
+        step=50.0,
+    )
+
+# ── Hero Header ──
+st.markdown(f"""
+<div class="hero">
+    <div class="hero-row">
+        <div>
+            <div class="hero-title">⚽ Ligue 1 Predictor</div>
+            <div class="hero-sub">Stacking Ensemble &middot; LR + RF + XGBoost + MLP &middot; {len(df)} matches trained</div>
+        </div>
+        <div class="hero-update">
+            Last update<br><strong>{last_update}</strong>
+        </div>
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+# ── Analyze ──
+if upcoming:
+    matches = analyze_all(df, config, meta, bases, upcoming, odds_data)
+else:
+    matches = []
+
+if not matches:
+    st.warning("No upcoming fixtures found. Run `python src/data/update.py` to fetch data.")
+    st.stop()
+
+# ── Disclaimer Banner ──
+st.markdown(f"""
+<div class="disclaimer-banner">
+    Este modelo acierta el 55.7% de los partidos en datos historicos.
+    Las apuestas deportivas implican riesgo real. Nunca apuestes mas de lo que puedes perder.
+</div>
+""", unsafe_allow_html=True)
+
+# ── Summary Metrics ──
+n_edge = sum(1 for m in matches if m["best_edge"] > 0.05)
+best_edge_match = max(matches, key=lambda x: x["best_edge"])
+best_edge_pct = best_edge_match["best_edge"] * 100
+
+st.markdown(f"""
+<div class="summary-row">
+    <div class="summary-box">
+        <div class="summary-val">{len(matches)}</div>
+        <div class="summary-label">Matches</div>
+    </div>
+    <div class="summary-box">
+        <div class="summary-val" style="color:{GREEN};">{n_edge}</div>
+        <div class="summary-label">With Edge</div>
+    </div>
+    <div class="summary-box">
+        <div class="summary-val" style="color:{BLUE};">{best_edge_pct:.1f}%</div>
+        <div class="summary-label">Best Edge</div>
+    </div>
+    <div class="summary-box">
+        <div class="summary-val" style="color:{GREEN};">55.7%</div>
+        <div class="summary-label">Model Accuracy</div>
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+st.caption("55.7% Accuracy (vs 33% aleatorio) — En futbol, predecir 1 de cada 3 resultados correctamente es el azar. Nuestro modelo acierta 1 de cada 1.8.")
+
+# ── Sort Toggle ──
+rounds = sorted(set(m["round"] for m in matches))
+rounds_str = ", ".join(f"J{r}" for r in rounds)
+st.markdown(f"### Upcoming Fixtures — {rounds_str}")
+
+sort_mode = st.radio(
+    "Ordenar por:",
+    options=["Fecha", "Edge"],
+    horizontal=True,
+    index=0,
 )
 
+if sort_mode == "Fecha":
+    matches.sort(key=lambda x: x["date_sort"])
+    st.caption("Ordenado por fecha (mas proximo primero). Verde = apuesta recomendada. Gris = skip.")
+else:
+    matches.sort(key=lambda x: x["best_edge"], reverse=True)
+    st.caption("Ordenado por mayor edge. Verde = apuesta recomendada. Gris = skip.")
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# PAGE 1: PREDICTOR
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ── Match Cards ──
+for m in matches:
+    card_html = render_card_html(m, bankroll)
+    st.markdown(card_html, unsafe_allow_html=True)
 
-if page == "Predictor":
-    st.title("Predictor de Partidos")
-    st.caption("Stacking Ensemble: LR + RF + XGBoost + MLP")
+    with st.expander(f"Details — {m['home']} vs {m['away']}"):
+        render_details(m)
 
-    df = load_features()
-    config, _, _ = load_stacking()
-    feat_cols = config["feature_cols"]
-    teams = get_teams(df)
-
-    col1, col2 = st.columns(2)
-    with col1:
-        home_team = st.selectbox("Equipo Local", teams, index=teams.index("Paris Saint Germain") if "Paris Saint Germain" in teams else 0)
-    with col2:
-        away_options = [t for t in teams if t != home_team]
-        away_team = st.selectbox("Equipo Visitante", away_options)
-
-    if st.button("Predecir", type="primary", use_container_width=True):
-        X = build_feature_vector(df, feat_cols, home_team, away_team)
-        if X is not None:
-            probs = predict_match(X)
-            ph, pd_, pa = probs["H"], probs["D"], probs["A"]
-
-            # ── Probability bar ──
-            st.markdown("### Probabilidades")
-            bar_html = f"""
-            <div class="prob-bar">
-                <div class="prob-segment" style="width:{ph*100:.0f}%; background:{GREEN};">
-                    {ph*100:.1f}%
-                </div>
-                <div class="prob-segment" style="width:{pd_*100:.0f}%; background:{YELLOW};">
-                    {pd_*100:.1f}%
-                </div>
-                <div class="prob-segment" style="width:{pa*100:.0f}%; background:{RED};">
-                    {pa*100:.1f}%
-                </div>
-            </div>
-            """
-            st.markdown(bar_html, unsafe_allow_html=True)
-            st.caption("Local | Empate | Visita")
-
-            # ── Prediction badge ──
-            pred = max(probs, key=probs.get)
-            conf = probs[pred]
-            if conf > 0.55:
-                conf_label = "ALTA"
-                conf_color = GREEN
-            elif conf > 0.45:
-                conf_label = "MEDIA"
-                conf_color = YELLOW
-            else:
-                conf_label = "BAJA"
-                conf_color = RED
-
-            st.markdown(f"""
-            <div class="metric-card" style="border-left: 4px solid {LABEL_COLORS[pred]};">
-                <div style="font-size:14px; color:{TEXT_MUTED};">PREDICCION</div>
-                <div style="font-size:32px; font-weight:800; color:{LABEL_COLORS[pred]};">
-                    {LABEL_NAMES[pred]}
-                </div>
-                <div style="font-size:14px; margin-top:4px;">
-                    Confianza: <span style="color:{conf_color}; font-weight:700;">{conf_label} ({conf*100:.1f}%)</span>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-            # ── Odds comparison + Kelly ──
-            st.markdown("### Modelo vs Casa de Apuestas")
-            st.caption("Ingresa los momios decimales de tu casa de apuestas")
-
-            oc1, oc2, oc3 = st.columns(3)
-            with oc1:
-                odds_h = st.number_input("Momio Local", min_value=1.01, value=2.00, step=0.05, format="%.2f")
-            with oc2:
-                odds_d = st.number_input("Momio Empate", min_value=1.01, value=3.30, step=0.05, format="%.2f")
-            with oc3:
-                odds_a = st.number_input("Momio Visita", min_value=1.01, value=3.50, step=0.05, format="%.2f")
-
-            implied_h = 1 / odds_h
-            implied_d = 1 / odds_d
-            implied_a = 1 / odds_a
-            total_implied = implied_h + implied_d + implied_a
-
-            comp_data = pd.DataFrame({
-                "Resultado": ["Local (H)", "Empate (D)", "Visita (A)"],
-                "Modelo %": [f"{ph*100:.1f}%", f"{pd_*100:.1f}%", f"{pa*100:.1f}%"],
-                "Momio": [f"{odds_h:.2f}", f"{odds_d:.2f}", f"{odds_a:.2f}"],
-                "Implícita %": [
-                    f"{implied_h/total_implied*100:.1f}%",
-                    f"{implied_d/total_implied*100:.1f}%",
-                    f"{implied_a/total_implied*100:.1f}%",
-                ],
-                "Edge %": [
-                    f"{(ph - implied_h/total_implied)*100:+.1f}%",
-                    f"{(pd_ - implied_d/total_implied)*100:+.1f}%",
-                    f"{(pa - implied_a/total_implied)*100:+.1f}%",
-                ],
-            })
-            st.dataframe(comp_data, use_container_width=True, hide_index=True)
-
-            # ── Kelly Criterion ──
-            st.markdown("### Kelly Criterion")
-            edges = {
-                "H": (ph, odds_h, kelly_criterion(ph, odds_h)),
-                "D": (pd_, odds_d, kelly_criterion(pd_, odds_d)),
-                "A": (pa, odds_a, kelly_criterion(pa, odds_a)),
-            }
-            has_edge = False
-            for outcome, (prob, odds, kelly) in edges.items():
-                edge = prob - (1 / odds)
-                if edge > 0.05 and kelly > 0:
-                    has_edge = True
-                    st.markdown(f"""
-                    <div class="kelly-box">
-                        Apostar <span style="font-size:24px;">{kelly*100:.1f}%</span> del bankroll
-                        a {LABEL_NAMES[outcome]} @ {odds:.2f}
-                        &nbsp;(edge: {edge*100:+.1f}%)
-                    </div>
-                    """, unsafe_allow_html=True)
-
-            if not has_edge:
-                st.markdown("""
-                <div class="no-edge-box">
-                    Sin edge > 5% — No apostar
-                </div>
-                """, unsafe_allow_html=True)
-
-            # ── Recent form ──
-            st.markdown("### Forma Reciente (ultimos 5)")
-            fc1, fc2 = st.columns(2)
-            with fc1:
-                form_home = get_team_form(df, home_team)
-                st.markdown(f"**{home_team}**")
-                st.markdown(render_form_dots(form_home), unsafe_allow_html=True)
-                wins = sum(1 for r in form_home if r == "H")
-                draws = sum(1 for r in form_home if r == "D")
-                losses = sum(1 for r in form_home if r == "A")
-                st.caption(f"{wins}W {draws}D {losses}L")
-
-            with fc2:
-                form_away = get_team_form(df, away_team)
-                st.markdown(f"**{away_team}**")
-                st.markdown(render_form_dots(form_away), unsafe_allow_html=True)
-                wins = sum(1 for r in form_away if r == "H")
-                draws = sum(1 for r in form_away if r == "D")
-                losses = sum(1 for r in form_away if r == "A")
-                st.caption(f"{wins}W {draws}D {losses}L")
-
-        else:
-            st.error("No hay datos suficientes para estos equipos.")
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# PAGE 2: MODEL COMPARISON
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-elif page == "Comparacion de Modelos":
-    st.title("Comparacion de Modelos")
-    st.caption("Holdout: Temporada 2024 (307 partidos)")
-
-    comp = load_comparison()
-
-    # ── Metrics table ──
-    st.markdown("### Metricas por Modelo")
-    display_comp = comp.copy()
-    for col in ["accuracy", "f1_macro", "f1_H", "f1_D", "f1_A", "roc_auc", "log_loss", "brier"]:
-        display_comp[col] = display_comp[col].map("{:.4f}".format)
-    st.dataframe(display_comp, use_container_width=True, hide_index=True)
-
-    # ── F1 Macro + ROC AUC bar chart ──
-    st.markdown("### F1 Macro vs ROC-AUC")
-
-    fig_bars = go.Figure()
-    fig_bars.add_trace(go.Bar(
-        x=comp["model"], y=comp["f1_macro"],
-        name="F1 Macro", marker_color=GREEN,
-    ))
-    fig_bars.add_trace(go.Bar(
-        x=comp["model"], y=comp["roc_auc"],
-        name="ROC AUC", marker_color="#448AFF",
-    ))
-    fig_bars.update_layout(
-        barmode="group",
-        plot_bgcolor=BG_DARK,
-        paper_bgcolor=BG_DARK,
-        font_color=TEXT,
-        yaxis_range=[0, 0.8],
-        height=400,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02),
-    )
-    st.plotly_chart(fig_bars, use_container_width=True)
-
-    # ── F1 per class heatmap ──
-    st.markdown("### F1 por Clase (H / D / A)")
-
-    f1_data = comp[["model", "f1_H", "f1_D", "f1_A"]].set_index("model")
-    fig_heat = go.Figure(data=go.Heatmap(
-        z=f1_data.values,
-        x=["Local (H)", "Empate (D)", "Visita (A)"],
-        y=f1_data.index,
-        colorscale=[[0, RED], [0.5, YELLOW], [1, GREEN]],
-        text=[[f"{v:.3f}" for v in row] for row in f1_data.values],
-        texttemplate="%{text}",
-        textfont_size=14,
-        zmin=0, zmax=0.7,
-    ))
-    fig_heat.update_layout(
-        plot_bgcolor=BG_DARK,
-        paper_bgcolor=BG_DARK,
-        font_color=TEXT,
-        height=350,
-    )
-    st.plotly_chart(fig_heat, use_container_width=True)
-
-    # ── Confusion matrix (best model = stacking) ──
-    st.markdown("### Confusion Matrix — Stacking Ensemble")
-
-    df = load_features()
-    config, meta, bases = load_stacking()
-    feat_cols = config["feature_cols"]
-
-    meta_cols = [c for c in df.columns if c not in [
-        "fixture_id", "season", "date", "matchday",
-        "home_team_id", "home_team", "away_team_id", "away_team",
-        "referee", "result",
-    ]]
-
-    test = df[df["season"] == 2024].dropna(subset=["home_goals_avg"]).copy()
-    for col in meta_cols:
-        if test[col].isna().any():
-            test[col] = test[col].fillna(df[col].median())
-
-    X_test = test[feat_cols].values.astype(np.float64)
-    le = LabelEncoder()
-    le.classes_ = np.array(LABEL_ORDER)
-    y_test = le.transform(test["result"].values)
-
-    # Predict with stacking
-    meta_features = []
-    for name in config["base_model_names"]:
-        meta_features.append(bases[name].predict_proba(X_test))
-    X_meta_test = np.hstack(meta_features)
-    y_pred = meta.predict(X_meta_test)
-
-    from sklearn.metrics import confusion_matrix
-    cm = confusion_matrix(y_test, y_pred, labels=[0, 1, 2])
-    fig_cm = go.Figure(data=go.Heatmap(
-        z=cm,
-        x=["Pred H", "Pred D", "Pred A"],
-        y=["Real H", "Real D", "Real A"],
-        colorscale=[[0, CARD_BG], [1, GREEN]],
-        text=cm,
-        texttemplate="%{text}",
-        textfont_size=18,
-    ))
-    fig_cm.update_layout(
-        plot_bgcolor=BG_DARK,
-        paper_bgcolor=BG_DARK,
-        font_color=TEXT,
-        height=400,
-        yaxis_autorange="reversed",
-    )
-    st.plotly_chart(fig_cm, use_container_width=True)
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# PAGE 3: BANKROLL TRACKER
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-elif page == "Bankroll Tracker":
-    st.title("Bankroll Tracker")
-
-    # Load or init bankroll data
-    if BANKROLL_PATH.exists():
-        bets = pd.read_csv(BANKROLL_PATH)
-        bets["date"] = pd.to_datetime(bets["date"])
-    else:
-        bets = pd.DataFrame(columns=["date", "match", "market", "odds", "stake", "result", "pnl"])
-
-    # ── Config ──
-    initial_bankroll = st.number_input(
-        "Bankroll Inicial ($)", min_value=0.0, value=1000.0, step=100.0,
-    )
-
-    st.markdown("---")
-    st.markdown("### Registrar Apuesta")
-
-    with st.form("bet_form"):
-        bc1, bc2 = st.columns(2)
-        with bc1:
-            bet_match = st.text_input("Partido", placeholder="PSG vs Lyon")
-            bet_market = st.selectbox("Mercado", ["Local (H)", "Empate (D)", "Visita (A)", "Over 2.5", "Under 2.5", "Otro"])
-        with bc2:
-            bet_odds = st.number_input("Momio Decimal", min_value=1.01, value=2.00, step=0.05)
-            bet_stake = st.number_input("Stake ($)", min_value=0.0, value=50.0, step=10.0)
-        bet_result = st.selectbox("Resultado", ["Pendiente", "Ganada", "Perdida", "Push"])
-        submitted = st.form_submit_button("Agregar Apuesta", use_container_width=True)
-
-        if submitted and bet_match:
-            if bet_result == "Ganada":
-                pnl = bet_stake * (bet_odds - 1)
-            elif bet_result == "Perdida":
-                pnl = -bet_stake
-            elif bet_result == "Push":
-                pnl = 0.0
-            else:
-                pnl = 0.0
-
-            new_bet = pd.DataFrame([{
-                "date": pd.Timestamp.now().strftime("%Y-%m-%d"),
-                "match": bet_match,
-                "market": bet_market,
-                "odds": bet_odds,
-                "stake": bet_stake,
-                "result": bet_result,
-                "pnl": pnl,
-            }])
-            bets = pd.concat([bets, new_bet], ignore_index=True)
-            bets.to_csv(BANKROLL_PATH, index=False)
-            st.success(f"Apuesta registrada: {bet_match} — P&L: ${pnl:+.2f}")
-            st.rerun()
-
-    # ── Stats ──
-    if len(bets) > 0:
-        resolved = bets[bets["result"].isin(["Ganada", "Perdida"])]
-
-        st.markdown("---")
-        st.markdown("### Resumen")
-
-        mc1, mc2, mc3, mc4 = st.columns(4)
-        total_pnl = bets["pnl"].sum()
-        total_staked = resolved["stake"].sum()
-        win_rate = (resolved["result"] == "Ganada").mean() * 100 if len(resolved) > 0 else 0
-        roi = (total_pnl / total_staked * 100) if total_staked > 0 else 0
-        current_bankroll = initial_bankroll + total_pnl
-
-        with mc1:
-            st.metric("Bankroll Actual", f"${current_bankroll:,.2f}", f"${total_pnl:+,.2f}")
-        with mc2:
-            st.metric("ROI", f"{roi:+.1f}%")
-        with mc3:
-            st.metric("Win Rate", f"{win_rate:.0f}%")
-        with mc4:
-            st.metric("Apuestas", f"{len(resolved)} / {len(bets)}")
-
-        # ── Bankroll curve ──
-        st.markdown("### Evolucion del Bankroll")
-        bets_sorted = bets.sort_values("date").copy()
-        bets_sorted["cumulative_pnl"] = bets_sorted["pnl"].cumsum()
-        bets_sorted["bankroll"] = initial_bankroll + bets_sorted["cumulative_pnl"]
-
-        fig_bankroll = go.Figure()
-        fig_bankroll.add_trace(go.Scatter(
-            x=bets_sorted["date"],
-            y=bets_sorted["bankroll"],
-            mode="lines+markers",
-            line=dict(color=GREEN, width=3),
-            marker=dict(size=8),
-            fill="tozeroy",
-            fillcolor="rgba(0,200,83,0.1)",
-        ))
-        fig_bankroll.add_hline(
-            y=initial_bankroll, line_dash="dash",
-            line_color=YELLOW, annotation_text="Bankroll Inicial",
-        )
-        fig_bankroll.update_layout(
-            plot_bgcolor=BG_DARK,
-            paper_bgcolor=BG_DARK,
-            font_color=TEXT,
-            yaxis_title="Bankroll ($)",
-            height=400,
-        )
-        st.plotly_chart(fig_bankroll, use_container_width=True)
-
-        # ── Bet history ──
-        st.markdown("### Historial de Apuestas")
-        display_bets = bets.copy()
-        display_bets["pnl"] = display_bets["pnl"].map("${:+,.2f}".format)
-        display_bets["odds"] = display_bets["odds"].map("{:.2f}".format)
-        display_bets["stake"] = display_bets["stake"].map("${:,.2f}".format)
-        st.dataframe(display_bets, use_container_width=True, hide_index=True)
-
-        # Delete button
-        if st.button("Borrar todo el historial", type="secondary"):
-            if BANKROLL_PATH.exists():
-                BANKROLL_PATH.unlink()
-            st.rerun()
-    else:
-        st.info("No hay apuestas registradas. Usa el formulario de arriba para comenzar.")
-
+    with st.expander(f"🧮 Calculadora de Momio — {m['home']} vs {m['away']}"):
+        render_calculadora(m, bankroll)
 
 # ── Footer ──
-st.sidebar.markdown("---")
-st.sidebar.caption("Ligue 1 Predictor v1.0")
-st.sidebar.caption("Stacking: LR + RF + XGB + MLP")
-st.sidebar.caption("Data: API-Football 2022-2024")
+st.markdown(f"""
+<div class="foot">
+    <strong>Disclaimer:</strong> Este modelo acierta el 55.7% de los partidos en datos historicos.
+    Las apuestas deportivas implican riesgo real. Nunca apuestes mas de lo que puedes perder.<br><br>
+    Ligue 1 Predictor v2.0 &middot; Stacking Ensemble (LR + RF + XGB + MLP)
+    &middot; Data: API-Football 2021-2025 ({len(df)} matches)
+</div>
+""", unsafe_allow_html=True)
